@@ -2,7 +2,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { AIResponse, ManualStep, CoverDesign, ManualMetadata, ProductInfo } from "../types";
 
 const createClient = () => {
-  const apiKey = "AIzaSyBbPFsratJL2J5cd-jbbLgkGGCPYZHtSIw";
+  const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error("GEMINI_API_KEY is missing. Please check your environment configuration.");
   }
