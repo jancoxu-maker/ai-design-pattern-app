@@ -23,8 +23,10 @@ jobs:
           node-version: 20
       - name: Install and Build
         run: |
-          npm install
-          npm run build -- --base=/ai-design-pattern-app/
+         npm install
+         npm run build -- --base=/ai-design-pattern-app/
+        env:
+         VITE_GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
