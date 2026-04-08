@@ -15,14 +15,16 @@ const getTextFromRes = (res: any) => {
   return res.text;
 };
 
+// 增强版：处理双重转义和清洗，防止 JSON 解析报错
 const safeParseJSON = (text: string) => {
   try {
-    const cleaned = text.replace(/^```json\s*/, '').replace(/\s*```$/, '');
-    const start = cleaned.indexOf('{');
-    const end = cleaned.lastIndexOf('}');
-    if (start === -1 || end === -1) throw new Error("No JSON object found");
-    return JSON.parse(cleaned.substring(start, end + 1));
+    let cleaned = text.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+    let parsed = JSON.parse(cleaned);
+    // 如果解析后还是字符串，说明被二次转义，再解析一次
+    if (typeof parsed === 'string') parsed = JSON.parse(parsed);
+    return parsed;
   } catch (e) {
+    console.error("SafeParse Error:", text);
     throw new Error("Failed to parse AI response as JSON");
   }
 };
@@ -81,11 +83,17 @@ export const generateProfessionalManual = async (
     const p2 = await generatePart("Writing Part 2...", "Write Chapters 8-9. Return JSON { pages: [...] }");
     const p3 = await generatePart("Writing Part 3...", "Write Chapters 10-11. Return JSON { pages: [...] }");
 
+    // 容错处理：确保合并的 pages 有 title 和 description 属性，防止 toLowerCase 报错
     const allPages = [
       ...(Array.isArray(p1.pages) ? p1.pages : []),
       ...(Array.isArray(p2.pages) ? p2.pages : []),
       ...(Array.isArray(p3.pages) ? p3.pages : [])
-    ];
+    ].map(page => ({
+        ...page,
+        title: page.title || "Untitled Section",
+        description: page.description || ""
+    }));
+    
     return { metadata: outlineData.metadata || {}, pages: allPages };
   } catch (error) { throw error; }
 };
