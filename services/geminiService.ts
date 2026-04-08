@@ -106,3 +106,56 @@ export const generateDescriptionFromImages = async (files: File[]): Promise<stri
 };
 
 // 对于其他函数（refineStepText 等），直接调用 safeParseJSON(res.text()) 即可
+// ... 接上面代码 ...
+
+// 补齐这些被组件调用的导出函数
+export const generateDescriptionFromImages = async (files: File[]): Promise<string> => {
+    const ai = createClient();
+    const imageParts = await Promise.all(files.slice(0, 3).map(f => fileToPart(f)));
+    const res = await ai.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: { parts: [...imageParts, { text: "Describe this action." }] },
+        config: { responseMimeType: "application/json" }
+    });
+    return safeParseJSON(res.text()).description;
+};
+
+export const refineStepText = async (currentTitle: string, currentDescription: string): Promise<AIResponse> => {
+  const ai = createClient();
+  const res = await ai.models.generateContent({
+    model: "gemini-3-flash-preview",
+    contents: `Refine: "${currentTitle}", "${currentDescription}"`,
+    config: { responseMimeType: "application/json" }
+  });
+  return safeParseJSON(res.text()) as AIResponse;
+};
+
+export const generateStepTitle = async (description: string): Promise<string> => {
+  const ai = createClient();
+  const res = await ai.models.generateContent({
+    model: "gemini-3-flash-preview",
+    contents: `Generate title for: "${description}"`,
+    config: { responseMimeType: "application/json" }
+  });
+  return safeParseJSON(res.text()).title;
+};
+
+export const generatePageTitle = async (steps: ManualStep[]): Promise<string> => {
+  const ai = createClient();
+  const res = await ai.models.generateContent({
+    model: "gemini-3-flash-preview",
+    contents: `Generate section title for steps: ${JSON.stringify(steps)}`,
+    config: { responseMimeType: "application/json" }
+  });
+  return safeParseJSON(res.text()).pageTitle;
+};
+
+export const generateCoverDesign = async (context: string): Promise<{ title: string; subtitle: string; design: CoverDesign }> => {
+  const ai = createClient();
+  const res = await ai.models.generateContent({
+    model: "gemini-3-flash-preview",
+    contents: `Generate cover for: ${context.slice(0, 1000)}`,
+    config: { responseMimeType: "application/json" }
+  });
+  return safeParseJSON(res.text());
+};
