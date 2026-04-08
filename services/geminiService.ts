@@ -14,19 +14,28 @@ const getTextFromRes = (res: any) => {
   return res.text;
 };
 
-// 极度宽容的解析模式
+// 终极宽容版：清洗所有转义字符并进行二次解析
 const safeParseJSON = (text: string) => {
   try {
-    // 直接定位第一个 '{' 和最后一个 '}'，暴力切割中间内容
-    const start = text.indexOf('{');
-    const end = text.lastIndexOf('}');
-    if (start === -1 || end === -1) return { pages: [], metadata: {} };
+    // 1. 移除 Markdown 代码块标记
+    let cleaned = text.replace(/^```json\s*/, '').replace(/\s*```$/, '');
     
-    let cleaned = text.substring(start, end + 1);
-    return JSON.parse(cleaned);
+    // 2. 清理转义：将转义后的引号和换行还原
+    cleaned = cleaned.replace(/\\"/g, '"').replace(/\\n/g, ' ');
+    
+    // 3. 暴力切割：找到最外层的 '{' 和 '}'
+    const start = cleaned.indexOf('{');
+    const end = cleaned.lastIndexOf('}');
+    if (start === -1 || end === -1) throw new Error("No JSON object found");
+    
+    let parsed = JSON.parse(cleaned.substring(start, end + 1));
+    
+    // 4. 处理模型可能返回的双重 JSON 字符串
+    if (typeof parsed === 'string') parsed = JSON.parse(parsed);
+    
+    return parsed;
   } catch (e) {
-    console.error("SafeParse Error (宽容模式):", text);
-    // 返回空结构，防止程序崩溃
+    console.error("SafeParse Error (Final Clean):", text);
     return { pages: [], metadata: {} }; 
   }
 };
@@ -59,6 +68,7 @@ const STRICT_RULES = `
   - DO NOT include markdown code blocks (no \`\`\`json).
   - DO NOT add ANY conversational text before or after the JSON.
   - DO NOT use the word "Chapter" or numbering like "Chapter 1".
+  - DO NOT escape quotes inside the JSON.
 `;
 
 export const generateProfessionalManual = async (
