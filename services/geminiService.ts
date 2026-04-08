@@ -1,63 +1,32 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { AIResponse, ManualStep, CoverDesign, ManualMetadata, ProductInfo } from "../types";
 
-const MODEL_NAME = "gemini-3.1-flash-lite-preview";
-
 const createClient = () => {
   const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error("GEMINI_API_KEY missing");
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY is missing. Please check your environment configuration.");
+  }
   return new GoogleGenAI({ apiKey });
 };
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-// 按照 Gemini 建议的“翻译官”方案精准提取
-const getTextFromRes = (res: any) => {
-  try {
-    // 方案 A: 按照 Gemini 建议的嵌套路径提取
-    if (res.candidates && res.candidates[0]?.content?.parts[0]?.text) {
-      return res.candidates[0].content.parts[0].text;
-    }
-    // 降级兼容：尝试调用方法或获取属性
-    if (typeof res.text === 'function') return res.text();
-    return res.text;
-  } catch (e) {
-    console.error("提取文本失败，尝试 fallback:", e);
-    return typeof res.text === 'function' ? res.text() : res.text;
-  }
+const safeJsonParse = (text: string) => {
+  const cleaned = text.replace(/^```json\s*/, '').replace(/\s*```$/, '').trim();
+  return JSON.parse(cleaned);
 };
 
-const safeParseJSON = (text: string) => {
+const callWithRetry = async <T>(
+  fn: () => Promise<T>,
+  retries = 5,
+  delay = 5000
+): Promise<T> => {
   try {
-    if (typeof text !== 'string') return text;
-    
-    // 清理 Markdown
-    let cleaned = text.replace(/^```json\s*/, '').replace(/\s*```$/, '');
-    
-    // 方案 A 核心：先尝试解析 JSON 字符串
-    let parsed = JSON.parse(cleaned);
-    
-    // 处理双重字符串化
-    if (typeof parsed === 'string') parsed = JSON.parse(parsed);
-    
-    return typeof parsed === 'object' ? parsed : { pages: [], metadata: {} };
-  } catch (e) {
-    // 暴力兜底：搜寻 {} 结构
-    try {
-        const start = text.indexOf('{');
-        const end = text.lastIndexOf('}');
-        return JSON.parse(text.substring(start, end + 1));
-    } catch (e2) {
-        console.error("SafeParse Error:", text);
-        return { pages: [], metadata: {} }; 
-    }
-  }
-};
-
-const callWithRetry = async <T>(fn: () => Promise<T>, retries = 3, delay = 2000): Promise<T> => {
-  try { return await fn(); }
-  catch (error: any) {
-    if ((error?.status === 429 || error?.message?.includes('429')) && retries > 0) {
+    return await fn();
+  } catch (error: any) {
+    const isRateLimit = error?.status === 429 || error?.message?.includes('429') || error?.message?.includes('RESOURCE_EXHAUSTED');
+    if (isRateLimit && retries > 0) {
+      console.warn(`Rate limit hit, retrying in ${delay}ms... (${retries} retries left)`);
       await sleep(delay);
       return callWithRetry(fn, retries - 1, delay * 2);
     }
@@ -65,24 +34,249 @@ const callWithRetry = async <T>(fn: () => Promise<T>, retries = 3, delay = 2000)
   }
 };
 
+// Helper to convert File to Base64
 const fileToPart = async (file: File) => {
   return new Promise<{ inlineData: { data: string; mimeType: string } }>((resolve, reject) => {
     const reader = new FileReader();
     reader.onloadend = () => {
-      resolve({ inlineData: { data: (reader.result as string).split(',')[1], mimeType: file.type } });
+      const base64String = (reader.result as string).split(',')[1];
+      resolve({
+        inlineData: {
+          data: base64String,
+          mimeType: file.type
+        }
+      });
     };
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
 };
 
-const STRICT_RULES = `
-  STRICT RULES:
-  - OUTPUT MUST BE A SINGLE VALID JSON OBJECT.
-  - DO NOT include markdown code blocks (no \`\`\`json).
-  - DO NOT add ANY conversational text before or after the JSON.
-  - DO NOT use the word "Chapter" or numbering like "Chapter 1".
-`;
+export const generateDescriptionFromImages = async (files: File[]): Promise<string> => {
+  const ai = createClient();
+  
+  if (files.length === 0) throw new Error("No images provided");
+
+  // Prepare images (limit to first 3 to save tokens/bandwidth if necessary)
+  const imageParts = await Promise.all(files.slice(0, 3).map(f => fileToPart(f)));
+
+  const prompt = `
+    Analyze these images which illustrate a step in a user manual. 
+    Write a clear, concise, and instructional description of what is happening or what action the user needs to take.
+    Directly describe the action. Do not say "The image shows...".
+    
+    IMPORTANT: The output must be in English only. Do not use any Chinese characters.
+  `;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: {
+        parts: [...imageParts, { text: prompt }]
+      },
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            description: { type: Type.STRING },
+          },
+          required: ["description"],
+        },
+      },
+    });
+
+    const text = response.text;
+    if (!text) throw new Error("No response from AI");
+
+    const data = safeJsonParse(text) as { description: string };
+    return data.description;
+  } catch (error) {
+    console.error("Error analyzing images:", error);
+    throw error;
+  }
+};
+
+export const refineStepText = async (
+  currentTitle: string,
+  currentDescription: string
+): Promise<AIResponse> => {
+  const ai = createClient();
+  
+  const prompt = `
+    You are an expert technical writer and editor. 
+    Your task is to refine the following user manual step to be clear, concise, professional, and easy to understand.
+    
+    Current Title: "${currentTitle}"
+    Current Description: "${currentDescription}"
+
+    IMPORTANT: The output must be in English only. Do not use any Chinese characters.
+    Return the refined title and description in valid JSON format.
+  `;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            refinedTitle: { type: Type.STRING },
+            refinedDescription: { type: Type.STRING },
+          },
+          required: ["refinedTitle", "refinedDescription"],
+        },
+      },
+    });
+
+    const text = response.text;
+    if (!text) throw new Error("No response from AI");
+
+    const data = safeJsonParse(text) as AIResponse;
+    return data;
+  } catch (error) {
+    console.error("Error calling Gemini API:", error);
+    throw error;
+  }
+};
+
+export const generateStepTitle = async (description: string): Promise<string> => {
+  const ai = createClient();
+  
+  const prompt = `
+    Based on the following step description, generate a short, action-oriented title (max 5 words).
+    
+    Description: "${description}"
+    
+    IMPORTANT: The output must be in English only. Do not use any Chinese characters.
+    Return just the title string in JSON.
+  `;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            title: { type: Type.STRING },
+          },
+          required: ["title"],
+        },
+      },
+    });
+
+    const text = response.text;
+    if (!text) throw new Error("No response from AI");
+
+    const data = safeJsonParse(text) as { title: string };
+    return data.title;
+  } catch (error) {
+    console.error("Error generating title:", error);
+    throw error;
+  }
+};
+
+export const generatePageTitle = async (steps: ManualStep[]): Promise<string> => {
+  const ai = createClient();
+
+  const stepsContent = steps.map((s, i) => `Step ${i+1}: ${s.title} - ${s.description}`).join('\n');
+
+  const prompt = `
+    You are organizing a user manual. Based on the following list of steps found on a single page, generate a short, professional Section Title for this page (e.g., "Installation", "Safety Warnings", "Troubleshooting", "Unboxing").
+    
+    Keep it under 5 words. Do not use quotation marks.
+
+    IMPORTANT: The output must be in English only. Do not use any Chinese characters.
+
+    Steps content:
+    ${stepsContent}
+  `;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            pageTitle: { type: Type.STRING },
+          },
+          required: ["pageTitle"],
+        },
+      },
+    });
+
+    const text = response.text;
+    if (!text) throw new Error("No response from AI");
+
+    const data = safeJsonParse(text) as { pageTitle: string };
+    return data.pageTitle;
+  } catch (error) {
+    console.error("Error generating page title:", error);
+    return "New Section"; // Fallback
+  }
+};
+
+export const generateCoverDesign = async (context: string): Promise<{ title: string; subtitle: string; design: CoverDesign }> => {
+  const ai = createClient();
+
+  const prompt = `
+    You are a professional graphic designer for product manuals. 
+    Based on the content of the manual provided below, suggest a catchy, professional Title and Subtitle.
+    Also suggest a visual design style for the cover page including colors and layout.
+    
+    Manual Content Summary:
+    ${context.slice(0, 2000)}
+
+    IMPORTANT: The output must be in English only. Do not use any Chinese characters.
+    Return JSON with 'title', 'subtitle', and a 'design' object.
+  `;
+
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            title: { type: Type.STRING },
+            subtitle: { type: Type.STRING },
+            design: {
+              type: Type.OBJECT,
+              properties: {
+                primaryColor: { type: Type.STRING, description: "Hex color" },
+                secondaryColor: { type: Type.STRING, description: "Hex color" },
+                textColor: { type: Type.STRING, description: "Hex color" },
+                layoutMode: { type: Type.STRING, enum: ["centered", "split", "overlay", "card", "minimal"] },
+                fontStyle: { type: Type.STRING, enum: ["serif", "sans", "mono"] },
+                overlayOpacity: { type: Type.NUMBER },
+              },
+              required: ["primaryColor", "secondaryColor", "textColor", "layoutMode", "fontStyle"],
+            },
+          },
+          required: ["title", "subtitle", "design"],
+        },
+      },
+    });
+
+    const text = response.text;
+    if (!text) throw new Error("No response from AI");
+
+    return safeJsonParse(text) as { title: string; subtitle: string; design: CoverDesign };
+  } catch (error) {
+    console.error("Error generating cover design:", error);
+    throw error;
+  }
+};
 
 export const generateProfessionalManual = async (
   description: string,
@@ -92,74 +286,110 @@ export const generateProfessionalManual = async (
   onProgress?: (message: string) => void
 ): Promise<{ metadata: Partial<ManualMetadata>; pages: any[] }> => {
   const ai = createClient();
+  
   const imageParts = await Promise.all(images.slice(0, 5).map(f => fileToPart(f)));
+
   try {
-    onProgress?.("Generating outline...");
-    const outlineRes = await callWithRetry(() => ai.models.generateContent({
-      model: MODEL_NAME,
-      contents: { parts: [...imageParts, { text: `Create manual outline for: ${description}. Return JSON { metadata, chapters }. ${STRICT_RULES}` }] }
+    // 1. Generate Outline based on Specifications
+    onProgress?.("Step 1: Analyzing specifications and generating outline...");
+    const outlinePrompt = `
+      You are a senior technical writer. Based on the following product description, product info, and images, create a detailed 11-chapter outline following the "Standard Manual Outline" specification:
+      1. Cover, 2. Preface, 3. Specifications, 4. Safety Warnings, 5. Product Parameters, 6. Package List, 7. Parts Diagram, 8. Installation/Operation, 9. Maintenance, 10. Troubleshooting, 11. Compliance & Contact.
+      
+      Product: ${description}
+      Product Info: ${JSON.stringify(productInfo)}
+      Market: ${market}
+      
+      IMPORTANT: The output must be in English only. Do not use any Chinese characters.
+      Return the outline as a JSON object with 'metadata' (title, subtitle) and 'chapters' (array of {id, title, description}).
+    `;
+
+    const outlineResponse = await callWithRetry(() => ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: { parts: [...imageParts, { text: outlinePrompt }] },
+      config: { responseMimeType: "application/json" }
     }));
-    const outlineData = safeParseJSON(getTextFromRes(outlineRes));
-    
-    const generatePart = async (title: string, prompt: string) => {
-      onProgress?.(title);
-      const res = await callWithRetry(() => ai.models.generateContent({
-        model: MODEL_NAME,
-        contents: `Based on outline: ${JSON.stringify(outlineData)}. ${prompt}. ${STRICT_RULES}`
-      }));
-      // 核心：应用方案 A 的路径解析
-      const aiText = getTextFromRes(res);
-      return safeParseJSON(aiText);
+    const outlineData = safeJsonParse(outlineResponse.text);
+
+    await sleep(2000); // Increased delay between calls
+
+    // 2. Generate Part 1: Cover to Parts Diagram (Chapters 1-7)
+    onProgress?.("Step 2: Writing Part 1 (Cover, Safety, Specs, Diagram)...");
+    const part1Prompt = `
+      Write the first part of the manual (corresponding to Chapters 1-7) based on this outline: ${JSON.stringify(outlineData)}.
+      Use this Product Info: ${JSON.stringify(productInfo)}
+      STRICT RULES:
+      - DO NOT use the word "Chapter" or any numbering like "Chapter 1" in titles or content.
+      - Preface: Must include "Legal Storage Requirement": Keep manual until product disposal; if sold, manual must accompany it.
+      - Safety: Use DANGER (Red), WARNING (Yellow), CAUTION (Blue) levels. Include Child Safety (Choking hazard) and Electrical Safety.
+      - Parameters: US market uses inch/lb/°F; EU uses cm/kg/°C.
+      - Diagram: Define official names for parts.
+      - Detail Level: Provide extensive, detailed, and comprehensive instructions. Do not be brief.
+      
+      IMPORTANT: The output must be in English only. Do not use any Chinese characters.
+      Return as JSON: { pages: Array<{type, title, steps: Array<{title, description, layout}>}> }
+    `;
+    const part1Response = await callWithRetry(() => ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: part1Prompt,
+      config: { responseMimeType: "application/json" }
+    }));
+    const part1Data = safeJsonParse(part1Response.text);
+
+    await sleep(2000); // Increased delay between calls
+
+    // 3. Generate Part 2: Operation & Maintenance (Chapters 8-9)
+    onProgress?.("Step 3: Writing Part 2 (Installation, Operation, Maintenance)...");
+    const part2Prompt = `
+      Write the second part of the manual (corresponding to Chapters 8-9) based on this outline: ${JSON.stringify(outlineData)}.
+      Use this Product Info: ${JSON.stringify(productInfo)}
+      STRICT RULES:
+      - DO NOT use the word "Chapter" or any numbering like "Chapter 1" in titles or content.
+      - Operation: Include "First Use Preparation" and "Tool Confirmation". Use Step 1, Step 2 logic. 
+      - Maintenance: Include "Cleaning Taboos" (No high-pressure water, no chemicals) and "Seasonal Maintenance".
+      - Detail Level: Provide extensive, detailed, and comprehensive instructions. Do not be brief.
+      
+      IMPORTANT: The output must be in English only. Do not use any Chinese characters.
+      Return as JSON: { pages: Array<{type, title, steps: Array<{title, description, layout}>}> }
+    `;
+    const part2Response = await callWithRetry(() => ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: part2Prompt,
+      config: { responseMimeType: "application/json" }
+    }));
+    const part2Data = safeJsonParse(part2Response.text);
+
+    await sleep(2000); // Increased delay between calls
+
+    // 4. Generate Part 3: Troubleshooting & Compliance (Chapters 10-11)
+    onProgress?.("Step 4: Writing Part 3 (Troubleshooting, Compliance, Contact)...");
+    const part3Prompt = `
+      Write the third part of the manual (corresponding to Chapters 10-11) based on this outline: ${JSON.stringify(outlineData)}.
+      Use this Product Info: ${JSON.stringify(productInfo)}
+      STRICT RULES:
+      - DO NOT use the word "Chapter" or any numbering like "Chapter 1" in titles or content.
+      - Troubleshooting: MUST use a Markdown table format with columns: | Problem | Possible Cause | Solution |. Use this format strictly.
+      - Compliance: Include placeholders for CE, FCC, RoHS, WEEE. Include Manufacturer and Rep info.
+      - Detail Level: Provide extensive, detailed, and comprehensive instructions. Do not be brief.
+      
+      IMPORTANT: The output must be in English only. Do not use any Chinese characters.
+      Return as JSON: { pages: Array<{type, title, steps: Array<{title, description, layout}>}> }
+    `;
+    const part3Response = await callWithRetry(() => ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: part3Prompt,
+      config: { responseMimeType: "application/json" }
+    }));
+    const part3Data = safeJsonParse(part3Response.text);
+
+    const allPages = [...part1Data.pages, ...part2Data.pages, ...part3Data.pages];
+
+    return {
+      metadata: outlineData.metadata,
+      pages: allPages
     };
-
-    const p1 = await generatePart("Writing Part 1...", "Write Chapters 1-7. Return JSON { pages: [...] }");
-    const p2 = await generatePart("Writing Part 2...", "Write Chapters 8-9. Return JSON { pages: [...] }");
-    const p3 = await generatePart("Writing Part 3...", "Write Chapters 10-11. Return JSON { pages: [...] }");
-
-    const allPages = [
-      ...(Array.isArray(p1?.pages) ? p1.pages : []),
-      ...(Array.isArray(p2?.pages) ? p2.pages : []),
-      ...(Array.isArray(p3?.pages) ? p3.pages : [])
-    ].map(page => ({
-        ...page,
-        title: (page && typeof page === 'object' && page.title) ? page.title : "Untitled Section",
-        description: (page && typeof page === 'object' && page.description) ? page.description : ""
-    }));
-    
-    return { metadata: outlineData.metadata || {}, pages: allPages };
-  } catch (error) { throw error; }
-};
-
-export const generateDescriptionFromImages = async (files: File[]): Promise<string> => {
-  const ai = createClient();
-  const parts = await Promise.all(files.slice(0, 3).map(f => fileToPart(f)));
-  const res = await ai.models.generateContent({
-    model: MODEL_NAME,
-    contents: { parts: [...parts, { text: "Describe this action. " + STRICT_RULES }] }
-  });
-  return safeParseJSON(getTextFromRes(res)).description || "";
-};
-
-export const refineStepText = async (t: string, d: string): Promise<AIResponse> => {
-  const ai = createClient();
-  const res = await ai.models.generateContent({ model: MODEL_NAME, contents: `Refine: "${t}", "${d}". ${STRICT_RULES}` });
-  return safeParseJSON(getTextFromRes(res)) as AIResponse;
-};
-
-export const generateStepTitle = async (d: string): Promise<string> => {
-  const ai = createClient();
-  const res = await ai.models.generateContent({ model: MODEL_NAME, contents: `Generate title for: "${d}". ${STRICT_RULES}` });
-  return safeParseJSON(getTextFromRes(res)).title || "Untitled";
-};
-
-export const generatePageTitle = async (steps: ManualStep[]): Promise<string> => {
-  const ai = createClient();
-  const res = await ai.models.generateContent({ model: MODEL_NAME, contents: `Generate section title for steps: ${JSON.stringify(steps)}. ${STRICT_RULES}` });
-  return safeParseJSON(getTextFromRes(res)).pageTitle || "New Section";
-};
-
-export const generateCoverDesign = async (context: string): Promise<{ title: string; subtitle: string; design: CoverDesign }> => {
-  const ai = createClient();
-  const res = await ai.models.generateContent({ model: MODEL_NAME, contents: `Generate cover for: ${context.slice(0, 1000)}. ${STRICT_RULES}` });
-  return safeParseJSON(getTextFromRes(res));
+  } catch (error) {
+    console.error("Error generating professional manual:", error);
+    throw error;
+  }
 };
