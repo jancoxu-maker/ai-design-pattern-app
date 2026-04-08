@@ -1,7 +1,6 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { AIResponse, ManualStep, CoverDesign, ManualMetadata, ProductInfo } from "../types";
 
-// 修改模型名称为 gemini-3.1-flash-lite-preview
 const MODEL_NAME = "gemini-3.1-flash-lite-preview";
 
 const createClient = () => {
@@ -12,31 +11,46 @@ const createClient = () => {
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+// 按照 Gemini 建议的“翻译官”方案精准提取
 const getTextFromRes = (res: any) => {
-  if (res.candidates && res.candidates[0]?.content?.parts[0]?.text) {
-    return res.candidates[0].content.parts[0].text;
+  try {
+    // 方案 A: 按照 Gemini 建议的嵌套路径提取
+    if (res.candidates && res.candidates[0]?.content?.parts[0]?.text) {
+      return res.candidates[0].content.parts[0].text;
+    }
+    // 降级兼容：尝试调用方法或获取属性
+    if (typeof res.text === 'function') return res.text();
+    return res.text;
+  } catch (e) {
+    console.error("提取文本失败，尝试 fallback:", e);
+    return typeof res.text === 'function' ? res.text() : res.text;
   }
-  if (typeof res.text === 'function') return res.text();
-  return res.text;
 };
 
 const safeParseJSON = (text: string) => {
   try {
     if (typeof text !== 'string') return text;
-    let cleaned = text.replace(/^```json\s*/, '').replace(/\s*```$/, '');
-    const start = cleaned.indexOf('{');
-    const end = cleaned.lastIndexOf('}');
-    if (start === -1 || end === -1) throw new Error("No JSON object found");
     
-    let parsed = JSON.parse(cleaned.substring(start, end + 1));
-    let depth = 0;
-    while (typeof parsed === 'string' && depth < 3) {
-      parsed = JSON.parse(parsed);
-      depth++;
-    }
+    // 清理 Markdown
+    let cleaned = text.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+    
+    // 方案 A 核心：先尝试解析 JSON 字符串
+    let parsed = JSON.parse(cleaned);
+    
+    // 处理双重字符串化
+    if (typeof parsed === 'string') parsed = JSON.parse(parsed);
+    
     return typeof parsed === 'object' ? parsed : { pages: [], metadata: {} };
   } catch (e) {
-    return { pages: [], metadata: {} }; 
+    // 暴力兜底：搜寻 {} 结构
+    try {
+        const start = text.indexOf('{');
+        const end = text.lastIndexOf('}');
+        return JSON.parse(text.substring(start, end + 1));
+    } catch (e2) {
+        console.error("SafeParse Error:", text);
+        return { pages: [], metadata: {} }; 
+    }
   }
 };
 
@@ -93,7 +107,9 @@ export const generateProfessionalManual = async (
         model: MODEL_NAME,
         contents: `Based on outline: ${JSON.stringify(outlineData)}. ${prompt}. ${STRICT_RULES}`
       }));
-      return safeParseJSON(getTextFromRes(res));
+      // 核心：应用方案 A 的路径解析
+      const aiText = getTextFromRes(res);
+      return safeParseJSON(aiText);
     };
 
     const p1 = await generatePart("Writing Part 1...", "Write Chapters 1-7. Return JSON { pages: [...] }");
