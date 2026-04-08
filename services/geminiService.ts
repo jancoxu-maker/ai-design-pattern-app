@@ -14,15 +14,20 @@ const getTextFromRes = (res: any) => {
   return res.text;
 };
 
+// 极度宽容的解析模式
 const safeParseJSON = (text: string) => {
   try {
-    let cleaned = text.replace(/^```json\s*/, '').replace(/\s*```$/, '');
-    let parsed = JSON.parse(cleaned);
-    if (typeof parsed === 'string') parsed = JSON.parse(parsed);
-    return parsed;
+    // 直接定位第一个 '{' 和最后一个 '}'，暴力切割中间内容
+    const start = text.indexOf('{');
+    const end = text.lastIndexOf('}');
+    if (start === -1 || end === -1) return { pages: [], metadata: {} };
+    
+    let cleaned = text.substring(start, end + 1);
+    return JSON.parse(cleaned);
   } catch (e) {
-    console.error("SafeParse Error:", text);
-    throw new Error("Failed to parse AI response as JSON");
+    console.error("SafeParse Error (宽容模式):", text);
+    // 返回空结构，防止程序崩溃
+    return { pages: [], metadata: {} }; 
   }
 };
 
@@ -54,7 +59,6 @@ const STRICT_RULES = `
   - DO NOT include markdown code blocks (no \`\`\`json).
   - DO NOT add ANY conversational text before or after the JSON.
   - DO NOT use the word "Chapter" or numbering like "Chapter 1".
-  - Return as JSON: { pages: Array<{type, title, steps: Array<{title, description, layout}>}> }
 `;
 
 export const generateProfessionalManual = async (
@@ -85,9 +89,9 @@ export const generateProfessionalManual = async (
       return safeParseJSON(getTextFromRes(res));
     };
 
-    const p1 = await generatePart("Writing Part 1...", "Write Chapters 1-7. Extensive detail.");
-    const p2 = await generatePart("Writing Part 2...", "Write Chapters 8-9. Extensive detail.");
-    const p3 = await generatePart("Writing Part 3...", "Write Chapters 10-11. Extensive detail.");
+    const p1 = await generatePart("Writing Part 1...", "Write Chapters 1-7. Return JSON { pages: [...] }");
+    const p2 = await generatePart("Writing Part 2...", "Write Chapters 8-9. Return JSON { pages: [...] }");
+    const p3 = await generatePart("Writing Part 3...", "Write Chapters 10-11. Return JSON { pages: [...] }");
 
     const allPages = [
       ...(Array.isArray(p1?.pages) ? p1.pages : []),
@@ -110,7 +114,7 @@ export const generateDescriptionFromImages = async (files: File[]): Promise<stri
     model: "gemini-3-flash-preview",
     contents: { parts: [...parts, { text: "Describe this action. " + STRICT_RULES }] }
   });
-  return safeParseJSON(getTextFromRes(res)).description;
+  return safeParseJSON(getTextFromRes(res)).description || "";
 };
 
 export const refineStepText = async (t: string, d: string): Promise<AIResponse> => {
@@ -122,13 +126,13 @@ export const refineStepText = async (t: string, d: string): Promise<AIResponse> 
 export const generateStepTitle = async (d: string): Promise<string> => {
   const ai = createClient();
   const res = await ai.models.generateContent({ model: "gemini-3-flash-preview", contents: `Generate title for: "${d}". ${STRICT_RULES}` });
-  return safeParseJSON(getTextFromRes(res)).title;
+  return safeParseJSON(getTextFromRes(res)).title || "Untitled";
 };
 
 export const generatePageTitle = async (steps: ManualStep[]): Promise<string> => {
   const ai = createClient();
   const res = await ai.models.generateContent({ model: "gemini-3-flash-preview", contents: `Generate section title for steps: ${JSON.stringify(steps)}. ${STRICT_RULES}` });
-  return safeParseJSON(getTextFromRes(res)).pageTitle;
+  return safeParseJSON(getTextFromRes(res)).pageTitle || "New Section";
 };
 
 export const generateCoverDesign = async (context: string): Promise<{ title: string; subtitle: string; design: CoverDesign }> => {
