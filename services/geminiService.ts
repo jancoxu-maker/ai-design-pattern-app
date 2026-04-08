@@ -1,6 +1,9 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { AIResponse, ManualStep, CoverDesign, ManualMetadata, ProductInfo } from "../types";
 
+// 修改模型名称为 gemini-3.1-flash-lite-preview
+const MODEL_NAME = "gemini-3.1-flash-lite-preview";
+
 const createClient = () => {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY missing");
@@ -10,42 +13,30 @@ const createClient = () => {
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 const getTextFromRes = (res: any) => {
+  if (res.candidates && res.candidates[0]?.content?.parts[0]?.text) {
+    return res.candidates[0].content.parts[0].text;
+  }
   if (typeof res.text === 'function') return res.text();
   return res.text;
 };
 
-// 终极鲁棒模式：递归解析字符串化的 JSON，并强制容错
 const safeParseJSON = (text: string) => {
   try {
-    // 1. 基础清理：移除所有 Markdown 标记
+    if (typeof text !== 'string') return text;
     let cleaned = text.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+    const start = cleaned.indexOf('{');
+    const end = cleaned.lastIndexOf('}');
+    if (start === -1 || end === -1) throw new Error("No JSON object found");
     
-    // 2. 第一次解析
-    let parsed = JSON.parse(cleaned);
-    
-    // 3. 递归解析：如果解析出来依然是个字符串，说明是二次序列化，继续解析
+    let parsed = JSON.parse(cleaned.substring(start, end + 1));
     let depth = 0;
     while (typeof parsed === 'string' && depth < 3) {
       parsed = JSON.parse(parsed);
       depth++;
     }
-    
-    // 4. 终极兜底：处理可能的转义引号冲突
-    if (typeof parsed === 'string') {
-        parsed = JSON.parse(parsed.replace(/\\"/g, '"').replace(/\\n/g, ' '));
-    }
-
     return typeof parsed === 'object' ? parsed : { pages: [], metadata: {} };
   } catch (e) {
-    console.error("SafeParse Error (Deep Clean):", text);
-    // 暴力兜底：在文本中搜寻第一个 '{' 到最后一个 '}'
-    try {
-        const start = text.indexOf('{');
-        const end = text.lastIndexOf('}');
-        return JSON.parse(text.substring(start, end + 1));
-    } catch (e2) {
-        return { pages: [], metadata: {} }; 
-    }
+    return { pages: [], metadata: {} }; 
   }
 };
 
@@ -91,7 +82,7 @@ export const generateProfessionalManual = async (
   try {
     onProgress?.("Generating outline...");
     const outlineRes = await callWithRetry(() => ai.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: MODEL_NAME,
       contents: { parts: [...imageParts, { text: `Create manual outline for: ${description}. Return JSON { metadata, chapters }. ${STRICT_RULES}` }] }
     }));
     const outlineData = safeParseJSON(getTextFromRes(outlineRes));
@@ -99,7 +90,7 @@ export const generateProfessionalManual = async (
     const generatePart = async (title: string, prompt: string) => {
       onProgress?.(title);
       const res = await callWithRetry(() => ai.models.generateContent({
-        model: "gemini-3-flash-preview",
+        model: MODEL_NAME,
         contents: `Based on outline: ${JSON.stringify(outlineData)}. ${prompt}. ${STRICT_RULES}`
       }));
       return safeParseJSON(getTextFromRes(res));
@@ -127,7 +118,7 @@ export const generateDescriptionFromImages = async (files: File[]): Promise<stri
   const ai = createClient();
   const parts = await Promise.all(files.slice(0, 3).map(f => fileToPart(f)));
   const res = await ai.models.generateContent({
-    model: "gemini-3-flash-preview",
+    model: MODEL_NAME,
     contents: { parts: [...parts, { text: "Describe this action. " + STRICT_RULES }] }
   });
   return safeParseJSON(getTextFromRes(res)).description || "";
@@ -135,24 +126,24 @@ export const generateDescriptionFromImages = async (files: File[]): Promise<stri
 
 export const refineStepText = async (t: string, d: string): Promise<AIResponse> => {
   const ai = createClient();
-  const res = await ai.models.generateContent({ model: "gemini-3-flash-preview", contents: `Refine: "${t}", "${d}". ${STRICT_RULES}` });
+  const res = await ai.models.generateContent({ model: MODEL_NAME, contents: `Refine: "${t}", "${d}". ${STRICT_RULES}` });
   return safeParseJSON(getTextFromRes(res)) as AIResponse;
 };
 
 export const generateStepTitle = async (d: string): Promise<string> => {
   const ai = createClient();
-  const res = await ai.models.generateContent({ model: "gemini-3-flash-preview", contents: `Generate title for: "${d}". ${STRICT_RULES}` });
+  const res = await ai.models.generateContent({ model: MODEL_NAME, contents: `Generate title for: "${d}". ${STRICT_RULES}` });
   return safeParseJSON(getTextFromRes(res)).title || "Untitled";
 };
 
 export const generatePageTitle = async (steps: ManualStep[]): Promise<string> => {
   const ai = createClient();
-  const res = await ai.models.generateContent({ model: "gemini-3-flash-preview", contents: `Generate section title for steps: ${JSON.stringify(steps)}. ${STRICT_RULES}` });
+  const res = await ai.models.generateContent({ model: MODEL_NAME, contents: `Generate section title for steps: ${JSON.stringify(steps)}. ${STRICT_RULES}` });
   return safeParseJSON(getTextFromRes(res)).pageTitle || "New Section";
 };
 
 export const generateCoverDesign = async (context: string): Promise<{ title: string; subtitle: string; design: CoverDesign }> => {
   const ai = createClient();
-  const res = await ai.models.generateContent({ model: "gemini-3-flash-preview", contents: `Generate cover for: ${context.slice(0, 1000)}. ${STRICT_RULES}` });
+  const res = await ai.models.generateContent({ model: MODEL_NAME, contents: `Generate cover for: ${context.slice(0, 1000)}. ${STRICT_RULES}` });
   return safeParseJSON(getTextFromRes(res));
 };
