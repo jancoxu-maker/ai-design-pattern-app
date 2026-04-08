@@ -83,15 +83,16 @@ export const generateProfessionalManual = async (
     const p2 = await generatePart("Writing Part 2...", "Write Chapters 8-9. Return JSON { pages: [...] }");
     const p3 = await generatePart("Writing Part 3...", "Write Chapters 10-11. Return JSON { pages: [...] }");
 
-    // 容错处理：确保合并的 pages 有 title 和 description 属性，防止 toLowerCase 报错
-    const allPages = [
-      ...(Array.isArray(p1.pages) ? p1.pages : []),
-      ...(Array.isArray(p2.pages) ? p2.pages : []),
-      ...(Array.isArray(p3.pages) ? p3.pages : [])
-    ].map(page => ({
+    // 强制合并逻辑，彻底过滤掉无效数据
+    const p1Pages = Array.isArray(p1?.pages) ? p1.pages : [];
+    const p2Pages = Array.isArray(p2?.pages) ? p2.pages : [];
+    const p3Pages = Array.isArray(p3?.pages) ? p3.pages : [];
+
+    const allPages = [...p1Pages, ...p2Pages, ...p3Pages].map(page => ({
         ...page,
-        title: page.title || "Untitled Section",
-        description: page.description || ""
+        // 只有当 page 确实是一个对象时才处理，否则返回默认值
+        title: (page && typeof page === 'object' && page.title) ? page.title : "Untitled Section",
+        description: (page && typeof page === 'object' && page.description) ? page.description : ""
     }));
     
     return { metadata: outlineData.metadata || {}, pages: allPages };
