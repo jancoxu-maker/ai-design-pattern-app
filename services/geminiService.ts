@@ -14,29 +14,29 @@ const getTextFromRes = (res: any) => {
   return res.text;
 };
 
-// 终极宽容版：清洗所有转义字符并进行二次解析
+// 终极解析逻辑：处理双重 JSON 序列化并暴力兜底
 const safeParseJSON = (text: string) => {
   try {
-    // 1. 移除 Markdown 代码块标记
+    // 1. 基础清理
     let cleaned = text.replace(/^```json\s*/, '').replace(/\s*```$/, '');
     
-    // 2. 清理转义：将转义后的引号和换行还原
-    cleaned = cleaned.replace(/\\"/g, '"').replace(/\\n/g, ' ');
+    // 2. 第一次解析
+    let parsed = JSON.parse(cleaned);
     
-    // 3. 暴力切割：找到最外层的 '{' 和 '}'
-    const start = cleaned.indexOf('{');
-    const end = cleaned.lastIndexOf('}');
-    if (start === -1 || end === -1) throw new Error("No JSON object found");
-    
-    let parsed = JSON.parse(cleaned.substring(start, end + 1));
-    
-    // 4. 处理模型可能返回的双重 JSON 字符串
+    // 3. 处理模型返回的二次转义字符串
     if (typeof parsed === 'string') parsed = JSON.parse(parsed);
     
     return parsed;
   } catch (e) {
-    console.error("SafeParse Error (Final Clean):", text);
-    return { pages: [], metadata: {} }; 
+    // 4. 暴力切割兜底
+    try {
+        const start = text.indexOf('{');
+        const end = text.lastIndexOf('}');
+        return JSON.parse(text.substring(start, end + 1));
+    } catch (e2) {
+        console.error("SafeParse Error:", text);
+        return { pages: [], metadata: {} }; 
+    }
   }
 };
 
@@ -68,7 +68,6 @@ const STRICT_RULES = `
   - DO NOT include markdown code blocks (no \`\`\`json).
   - DO NOT add ANY conversational text before or after the JSON.
   - DO NOT use the word "Chapter" or numbering like "Chapter 1".
-  - DO NOT escape quotes inside the JSON.
 `;
 
 export const generateProfessionalManual = async (
@@ -84,8 +83,8 @@ export const generateProfessionalManual = async (
     onProgress?.("Generating outline...");
     const outlineRes = await callWithRetry(() => ai.models.generateContent({
       model: "gemini-3-flash-preview",
-      contents: { parts: [...imageParts, { text: `Create manual outline for: ${description}. Return JSON { metadata, chapters }. ${STRICT_RULES}` }] },
-      config: { responseMimeType: "application/json" }
+      contents: { parts: [...imageParts, { text: `Create manual outline for: ${description}. Return JSON { metadata, chapters }. ${STRICT_RULES}` }] }
+      // 移除 responseMimeType: "application/json" 配置，改用纯文本模式以防止过度转义
     }));
     const outlineData = safeParseJSON(getTextFromRes(outlineRes));
     
@@ -93,8 +92,7 @@ export const generateProfessionalManual = async (
       onProgress?.(title);
       const res = await callWithRetry(() => ai.models.generateContent({
         model: "gemini-3-flash-preview",
-        contents: `Based on outline: ${JSON.stringify(outlineData)}. ${prompt}. ${STRICT_RULES}`,
-        config: { responseMimeType: "application/json" }
+        contents: `Based on outline: ${JSON.stringify(outlineData)}. ${prompt}. ${STRICT_RULES}`
       }));
       return safeParseJSON(getTextFromRes(res));
     };
