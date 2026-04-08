@@ -14,27 +14,36 @@ const getTextFromRes = (res: any) => {
   return res.text;
 };
 
-// 终极解析逻辑：处理双重 JSON 序列化并暴力兜底
+// 终极鲁棒模式：递归解析字符串化的 JSON，并强制容错
 const safeParseJSON = (text: string) => {
   try {
-    // 1. 基础清理
+    // 1. 基础清理：移除所有 Markdown 标记
     let cleaned = text.replace(/^```json\s*/, '').replace(/\s*```$/, '');
     
     // 2. 第一次解析
     let parsed = JSON.parse(cleaned);
     
-    // 3. 处理模型返回的二次转义字符串
-    if (typeof parsed === 'string') parsed = JSON.parse(parsed);
+    // 3. 递归解析：如果解析出来依然是个字符串，说明是二次序列化，继续解析
+    let depth = 0;
+    while (typeof parsed === 'string' && depth < 3) {
+      parsed = JSON.parse(parsed);
+      depth++;
+    }
     
-    return parsed;
+    // 4. 终极兜底：处理可能的转义引号冲突
+    if (typeof parsed === 'string') {
+        parsed = JSON.parse(parsed.replace(/\\"/g, '"').replace(/\\n/g, ' '));
+    }
+
+    return typeof parsed === 'object' ? parsed : { pages: [], metadata: {} };
   } catch (e) {
-    // 4. 暴力切割兜底
+    console.error("SafeParse Error (Deep Clean):", text);
+    // 暴力兜底：在文本中搜寻第一个 '{' 到最后一个 '}'
     try {
         const start = text.indexOf('{');
         const end = text.lastIndexOf('}');
         return JSON.parse(text.substring(start, end + 1));
     } catch (e2) {
-        console.error("SafeParse Error:", text);
         return { pages: [], metadata: {} }; 
     }
   }
@@ -84,7 +93,6 @@ export const generateProfessionalManual = async (
     const outlineRes = await callWithRetry(() => ai.models.generateContent({
       model: "gemini-3-flash-preview",
       contents: { parts: [...imageParts, { text: `Create manual outline for: ${description}. Return JSON { metadata, chapters }. ${STRICT_RULES}` }] }
-      // 移除 responseMimeType: "application/json" 配置，改用纯文本模式以防止过度转义
     }));
     const outlineData = safeParseJSON(getTextFromRes(outlineRes));
     
