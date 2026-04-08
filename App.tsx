@@ -493,7 +493,7 @@ const App: React.FC = () => {
 
   return (
     <div className=\"flex flex-col h-[100dvh] bg-zinc-50 text-zinc-800 font-sans overflow-hidden\">
-       {/* ... (此处保持原有 JSX 结构不变) ... */}
+       {/* UI 结构已被还原 */}
     </div>
   );
 };
