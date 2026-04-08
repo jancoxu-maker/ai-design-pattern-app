@@ -9,7 +9,7 @@ const createClient = () => {
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-// 兼容性获取 text 的方法：兼容 res.text 属性和 res.text() 方法
+// 兼容性获取 text 的方法
 const getTextFromRes = (res: any) => {
   if (typeof res.text === 'function') return res.text();
   return res.text;
@@ -20,7 +20,7 @@ const safeParseJSON = (text: string) => {
   try {
     let cleaned = text.replace(/^```json\s*/, '').replace(/\s*```$/, '');
     let parsed = JSON.parse(cleaned);
-    // 如果解析后还是字符串，说明被二次转义，再解析一次
+    // 处理双重字符串化
     if (typeof parsed === 'string') parsed = JSON.parse(parsed);
     return parsed;
   } catch (e) {
@@ -83,14 +83,13 @@ export const generateProfessionalManual = async (
     const p2 = await generatePart("Writing Part 2...", "Write Chapters 8-9. Return JSON { pages: [...] }");
     const p3 = await generatePart("Writing Part 3...", "Write Chapters 10-11. Return JSON { pages: [...] }");
 
-    // 强制合并逻辑，彻底过滤掉无效数据
-    const p1Pages = Array.isArray(p1?.pages) ? p1.pages : [];
-    const p2Pages = Array.isArray(p2?.pages) ? p2.pages : [];
-    const p3Pages = Array.isArray(p3?.pages) ? p3.pages : [];
-
-    const allPages = [...p1Pages, ...p2Pages, ...p3Pages].map(page => ({
+    // 容错处理：确保合并的 pages 有 title 和 description 属性，防止 toLowerCase 报错
+    const allPages = [
+      ...(Array.isArray(p1?.pages) ? p1.pages : []),
+      ...(Array.isArray(p2?.pages) ? p2.pages : []),
+      ...(Array.isArray(p3?.pages) ? p3.pages : [])
+    ].map(page => ({
         ...page,
-        // 只有当 page 确实是一个对象时才处理，否则返回默认值
         title: (page && typeof page === 'object' && page.title) ? page.title : "Untitled Section",
         description: (page && typeof page === 'object' && page.description) ? page.description : ""
     }));
