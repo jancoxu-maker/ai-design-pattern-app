@@ -11,11 +11,6 @@ const createClient = () => {
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-const safeJsonParse = (text: string) => {
-  const cleaned = text.replace(/^```json\s*/, '').replace(/\s*```$/, '').trim();
-  return JSON.parse(cleaned);
-};
-
 const callWithRetry = async <T>(
   fn: () => Promise<T>,
   retries = 5,
@@ -50,6 +45,15 @@ const fileToPart = async (file: File) => {
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
+};
+
+const parseJsonResponse = (text: string): any => {
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start === -1 || end === -1) {
+    throw new Error("No JSON object found in response");
+  }
+  return JSON.parse(text.substring(start, end + 1));
 };
 
 export const generateDescriptionFromImages = async (files: File[]): Promise<string> => {
@@ -89,7 +93,7 @@ export const generateDescriptionFromImages = async (files: File[]): Promise<stri
     const text = response.text;
     if (!text) throw new Error("No response from AI");
 
-    const data = safeJsonParse(text) as { description: string };
+    const data = JSON.parse(text) as { description: string };
     return data.description;
   } catch (error) {
     console.error("Error analyzing images:", error);
@@ -134,7 +138,7 @@ export const refineStepText = async (
     const text = response.text;
     if (!text) throw new Error("No response from AI");
 
-    const data = safeJsonParse(text) as AIResponse;
+    const data = JSON.parse(text) as AIResponse;
     return data;
   } catch (error) {
     console.error("Error calling Gemini API:", error);
@@ -173,7 +177,7 @@ export const generateStepTitle = async (description: string): Promise<string> =>
     const text = response.text;
     if (!text) throw new Error("No response from AI");
 
-    const data = safeJsonParse(text) as { title: string };
+    const data = JSON.parse(text) as { title: string };
     return data.title;
   } catch (error) {
     console.error("Error generating title:", error);
@@ -216,7 +220,7 @@ export const generatePageTitle = async (steps: ManualStep[]): Promise<string> =>
     const text = response.text;
     if (!text) throw new Error("No response from AI");
 
-    const data = safeJsonParse(text) as { pageTitle: string };
+    const data = JSON.parse(text) as { pageTitle: string };
     return data.pageTitle;
   } catch (error) {
     console.error("Error generating page title:", error);
@@ -271,7 +275,7 @@ export const generateCoverDesign = async (context: string): Promise<{ title: str
     const text = response.text;
     if (!text) throw new Error("No response from AI");
 
-    return safeJsonParse(text) as { title: string; subtitle: string; design: CoverDesign };
+    return JSON.parse(text) as { title: string; subtitle: string; design: CoverDesign };
   } catch (error) {
     console.error("Error generating cover design:", error);
     throw error;
@@ -309,7 +313,7 @@ export const generateProfessionalManual = async (
       contents: { parts: [...imageParts, { text: outlinePrompt }] },
       config: { responseMimeType: "application/json" }
     }));
-    const outlineData = safeJsonParse(outlineResponse.text);
+    const outlineData = parseJsonResponse(outlineResponse.text);
 
     await sleep(2000); // Increased delay between calls
 
@@ -334,7 +338,7 @@ export const generateProfessionalManual = async (
       contents: part1Prompt,
       config: { responseMimeType: "application/json" }
     }));
-    const part1Data = safeJsonParse(part1Response.text);
+    const part1Data = parseJsonResponse(part1Response.text);
 
     await sleep(2000); // Increased delay between calls
 
@@ -357,7 +361,7 @@ export const generateProfessionalManual = async (
       contents: part2Prompt,
       config: { responseMimeType: "application/json" }
     }));
-    const part2Data = safeJsonParse(part2Response.text);
+    const part2Data = parseJsonResponse(part2Response.text);
 
     await sleep(2000); // Increased delay between calls
 
@@ -380,7 +384,7 @@ export const generateProfessionalManual = async (
       contents: part3Prompt,
       config: { responseMimeType: "application/json" }
     }));
-    const part3Data = safeJsonParse(part3Response.text);
+    const part3Data = parseJsonResponse(part3Response.text);
 
     const allPages = [...part1Data.pages, ...part2Data.pages, ...part3Data.pages];
 
